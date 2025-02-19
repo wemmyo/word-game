@@ -6,9 +6,9 @@ import { GameBoard } from "@/components/game-board";
 export default async function GameBoardPage({
   searchParams,
 }: {
-  searchParams: { lobbyId: string };
+  searchParams: Promise<{ lobbyId: string }>;
 }) {
-  const { lobbyId } = searchParams; // Remove 'await' here
+  const { lobbyId } = await searchParams; // Remove 'await' here
   const supabase = await createClient();
 
   // Retrieve the authenticated user.
