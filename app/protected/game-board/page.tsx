@@ -8,7 +8,8 @@ export default async function GameBoardPage({
 }: {
   searchParams: { lobbyId: string };
 }) {
-  const { lobbyId } = searchParams;
+  // const { lobbyId } = searchParams;
+  const lobbyId = searchParams.lobbyId;
   const supabase = await createClient();
 
   // Retrieve the authenticated user.
