@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useTransition } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,12 +29,14 @@ export type Player = {
 export type GameBoardProps = {
   players: Player[];
   currentWord: string;
-  timeLeft: number; // duration (in seconds) for each round timer
-  maxTime: number; // maximum time per round (in seconds)
+  timeLeft: number;
+  maxTime: number;
   lobbyId: string;
   playerId: string;
   gameCode: string;
-  currentPlayer: string; // initial active player's turn (from server)
+  currentPlayer: string;
+  currentRoundId: string | null;
+  roundStartTime: number | null;
 };
 
 export function GameBoard({
@@ -46,50 +48,137 @@ export function GameBoard({
   playerId,
   gameCode,
   currentPlayer: initialActivePlayer,
+  currentRoundId: initialRoundId,
+  roundStartTime: initialRoundStartTime,
 }: GameBoardProps) {
-  // State for dispute modal.
+  // Local states
   const [showDisputeModal, setShowDisputeModal] = useState(false);
-  // Local state for current word.
   const [localCurrentWord, setLocalCurrentWord] = useState(currentWord);
   const [newWord, setNewWord] = useState("");
   const [players, setPlayers] = useState<Player[]>(initialPlayers);
   const [latestSubmission, setLatestSubmission] = useState<any>(null);
-  const [currentRoundId, setCurrentRoundId] = useState<string | null>(null);
-  // Instead of storing the timer count directly, we store the common round start time.
-  const [roundStartTime, setRoundStartTime] = useState<number | null>(null);
-  // activeTimer is now computed based on roundStartTime.
+  const [currentRoundId, setCurrentRoundId] = useState<string | null>(
+    initialRoundId
+  );
+  const [roundStartTime, setRoundStartTime] = useState<number | null>(
+    initialRoundStartTime
+  );
+  const [isTurnActive, setIsTurnActive] = useState(false);
+
   const [activeTimer, setActiveTimer] = useState<number>(timeLeft);
   const [eliminationTriggered, setEliminationTriggered] = useState(false);
-  // Track active turn.
   const [activePlayer, setActivePlayer] = useState<string>(initialActivePlayer);
-  const [roundStartingPlayer, setRoundStartingPlayer] = useState<string | null>(
-    null
-  );
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [winner, setWinner] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
   const supabase = useMemo(() => createClient(), []);
 
-  // --- Realtime Timer Effect ---
-  // When roundStartTime is set, compute the remaining time as:
-  //   activeTimer = maxTime - floor((now - roundStartTime) / 1000)
-  // and update every second.
+  // Helper: Generate a random word.
+  function generateRandomWord() {
+    const words = ["apple", "brave", "crane", "delta", "eagle"];
+    return words[Math.floor(Math.random() * words.length)];
+  }
+
+  // --- Timer Effect ---
   useEffect(() => {
     if (!roundStartTime) return;
     const interval = setInterval(() => {
       const elapsed = Math.floor((Date.now() - roundStartTime) / 1000);
       const remaining = maxTime - elapsed;
       setActiveTimer(remaining > 0 ? remaining : 0);
-      if (remaining <= 0) {
-        clearInterval(interval);
-      }
+      if (remaining <= 0) clearInterval(interval);
     }, 1000);
     return () => clearInterval(interval);
   }, [roundStartTime, maxTime]);
 
-  // --- Realtime Subscription for Rounds (INSERT and UPDATE) ---
-  // This subscription listens for new rounds and for updates (such as timer resets)
-  // so that all clients share the same round start time.
+  // --- Auto-Elimination & Auto-Round Restart ---
+  useEffect(() => {
+    if (roundStartTime && activeTimer === 0 && !eliminationTriggered) {
+      setEliminationTriggered(true);
+      const formData = new FormData();
+      formData.append("playerId", activePlayer);
+      formData.append("lobbyId", lobbyId);
+      eliminatePlayerAction(formData)
+        .then(() => {
+          autoStartNextRound();
+        })
+        .catch((err) => console.error("Auto-elimination error:", err));
+    }
+  }, [
+    activeTimer,
+    eliminationTriggered,
+    activePlayer,
+    lobbyId,
+    roundStartTime,
+  ]);
+
+  async function autoStartNextRound() {
+    // Fetch the latest players list.
+    const { data: playersData, error } = await supabase
+      .from("players")
+      .select("*")
+      .eq("lobby_id", lobbyId);
+    if (error) {
+      console.error("Error fetching players:", error);
+      return;
+    }
+    const updatedPlayers = playersData.map((p: any) => ({
+      id: p.id,
+      name: p.name,
+      isEliminated: p.status === "eliminated",
+      isHost: p.is_host,
+      join_order: p.join_order,
+      avatar: `/avatars/${p.id}.png`,
+    }));
+    setPlayers(updatedPlayers);
+    const activePlayers = updatedPlayers
+      .filter((p) => !p.isEliminated)
+      .sort((a, b) => a.join_order - b.join_order);
+    if (activePlayers.length === 0) {
+      console.warn("No active players left");
+      return;
+    }
+    const eliminatedPlayer = updatedPlayers.find((p) => p.id === activePlayer);
+    let nextActivePlayer;
+    if (eliminatedPlayer) {
+      nextActivePlayer =
+        activePlayers.find((p) => p.join_order > eliminatedPlayer.join_order) ||
+        activePlayers[0];
+    } else {
+      nextActivePlayer = activePlayers[0];
+    }
+    const startingWord = generateRandomWord();
+    const formData = new FormData();
+    formData.append("lobbyId", lobbyId);
+    formData.append("startingPlayerId", nextActivePlayer.id);
+    formData.append("startingWord", startingWord);
+
+    try {
+      const newRound = await startRoundAction(formData);
+      // Immediately update the round with the chosen active player.
+      await supabase
+        .from("rounds")
+        .update({ active_player_id: nextActivePlayer.id })
+        .eq("id", newRound.id);
+      setCurrentRoundId(newRound.id);
+      setRoundStartTime(
+        newRound.start_time
+          ? new Date(newRound.start_time).getTime()
+          : Date.now()
+      );
+      setLatestSubmission(null);
+      setLocalCurrentWord(newRound.starting_word);
+      setActivePlayer(nextActivePlayer.id);
+      setEliminationTriggered(false);
+      // Activate turn after 1 second
+      setTimeout(() => setIsTurnActive(true), 1000);
+    } catch (error) {
+      console.error("Auto start round error:", error);
+    }
+  }
+
+  // --- Realtime Subscriptions ---
   useEffect(() => {
     if (!lobbyId) return;
     const roundsChannel = supabase
@@ -106,12 +195,11 @@ export function GameBoard({
           const newRound = payload.new;
           setCurrentRoundId(newRound.id);
           setLocalCurrentWord(newRound.starting_word);
-          // Use the round's start_time if provided; otherwise, use now.
-          if (newRound.start_time) {
-            setRoundStartTime(new Date(newRound.start_time).getTime());
-          } else {
-            setRoundStartTime(Date.now());
-          }
+          setRoundStartTime(
+            newRound.start_time
+              ? new Date(newRound.start_time).getTime()
+              : Date.now()
+          );
           if (newRound.active_player_id) {
             setActivePlayer(newRound.active_player_id);
           }
@@ -130,6 +218,9 @@ export function GameBoard({
           if (updatedRound.start_time) {
             setRoundStartTime(new Date(updatedRound.start_time).getTime());
           }
+          if (updatedRound.active_player_id) {
+            setActivePlayer(updatedRound.active_player_id);
+          }
         }
       )
       .subscribe();
@@ -138,7 +229,6 @@ export function GameBoard({
     };
   }, [lobbyId, supabase]);
 
-  // --- Realtime Subscription for Submissions & Players ---
   useEffect(() => {
     if (!currentRoundId) return;
     const submissionChannel = supabase
@@ -205,34 +295,7 @@ export function GameBoard({
     };
   }, [lobbyId, supabase]);
 
-  // --- Recalculate Active Turn on New Submission ---
-  useEffect(() => {
-    const activePlayers = players
-      .filter((p) => !p.isEliminated)
-      .sort((a, b) => a.join_order - b.join_order);
-    if (latestSubmission) {
-      const submitterIndex = activePlayers.findIndex(
-        (p) => p.id === latestSubmission.player_id
-      );
-      if (activePlayers.length > 0 && submitterIndex !== -1) {
-        const nextIndex = (submitterIndex + 1) % activePlayers.length;
-        setActivePlayer(activePlayers[nextIndex].id);
-      }
-    }
-  }, [latestSubmission, players]);
-
-  // --- Winning Condition ---
-  const [winner, setWinner] = useState<string | null>(null);
-  useEffect(() => {
-    const activePlayers = players.filter((p) => !p.isEliminated);
-    if (players.length > 1 && activePlayers.length === 1) {
-      setWinner(activePlayers[0].id);
-    } else {
-      setWinner(null);
-    }
-  }, [players]);
-
-  // --- Word Submission ---
+  // --- Word Submission Handler ---
   async function handleSubmitWord(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (!currentRoundId) return;
@@ -242,16 +305,13 @@ export function GameBoard({
     formData.append("playerId", playerId);
     formData.append("roundId", currentRoundId);
     try {
-      const submission = await submitWordAction(formData);
+      // submitWordAction returns { submission, updatedRound }
+      const { submission, updatedRound } = await submitWordAction(formData);
       setLatestSubmission(submission);
       setLocalCurrentWord(submission.word);
       setNewWord("");
-      // After a successful submission, update the round’s start time in the database.
-      // This will trigger the realtime subscription and reset the timer for all players.
-      await supabase
-        .from("rounds")
-        .update({ start_time: new Date().toISOString() })
-        .eq("id", currentRoundId);
+      // Update active turn from the updated round record.
+      setActivePlayer(updatedRound.active_player_id);
     } catch (error) {
       console.error("Submission error:", error);
     } finally {
@@ -259,30 +319,30 @@ export function GameBoard({
     }
   }
 
-  // --- Dispute Voting ---
+  // --- Dispute Voting Handler ---
   function handleDisputeClick() {
     setShowDisputeModal(true);
   }
+  const canDispute =
+    latestSubmission &&
+    Date.now() - new Date(latestSubmission.created_at).getTime() <= 5000;
 
-  // --- Start New Round ---
+  // --- Manual Round Start Handler ---
   async function handleStartRound(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (isCurrentUserEliminated) return;
     const formData = new FormData(e.currentTarget);
     formData.append("lobbyId", lobbyId);
+    // For manual start, use the current player's id.
     formData.append("startingPlayerId", playerId);
     try {
       const newRound = await startRoundAction(formData);
-      // Update local round state.
       setCurrentRoundId(newRound.id);
-      // Refresh players from the database.
+      // Fetch updated players list.
       const { data: playersData, error } = await supabase
         .from("players")
         .select("*")
         .eq("lobby_id", lobbyId);
-      if (error) {
-        console.error("Error fetching players:", error);
-      }
+      if (error) console.error("Error fetching players:", error);
       const updatedPlayers = (playersData || []).map((p: any) => ({
         id: p.id,
         name: p.name,
@@ -292,38 +352,35 @@ export function GameBoard({
         avatar: `/avatars/${p.id}.png`,
       }));
       setPlayers(updatedPlayers);
-
-      // Compute next active player (skip the starting player).
-      const activePlayers = updatedPlayers
-        .filter((p) => !p.isEliminated)
-        .sort((a, b) => a.join_order - b.join_order);
-      const startingIndex = activePlayers.findIndex(
-        (p) => p.id === newRound.starting_player_id
+      setRoundStartTime(
+        newRound.start_time
+          ? new Date(newRound.start_time).getTime()
+          : Date.now()
       );
-      let nextIndex = startingIndex + 1;
-      if (nextIndex >= activePlayers.length) nextIndex = 0;
-      const nextActivePlayer = activePlayers[nextIndex].id;
-      // Update round's active_player_id so all clients get the update.
-      await supabase
-        .from("rounds")
-        .update({ active_player_id: nextActivePlayer })
-        .eq("id", newRound.id);
-      // Assume newRound.start_time is set in the response.
-      if (newRound.start_time) {
-        setRoundStartTime(new Date(newRound.start_time).getTime());
-      } else {
-        setRoundStartTime(Date.now());
-      }
       setLatestSubmission(null);
       setLocalCurrentWord(newRound.starting_word);
+      // For manual start, set active player to current player.
+      setActivePlayer(playerId);
+      setEliminationTriggered(false);
+      // **Add this line to enable the turn immediately:**
+      setIsTurnActive(true);
     } catch (error) {
       console.error("Start round error:", error);
     }
   }
 
-  // --- Determine if Current User is Eliminated ---
   const currentUser = players.find((p) => p.id === playerId);
   const isCurrentUserEliminated = currentUser?.isEliminated || false;
+
+  // --- Winning Condition ---
+  useEffect(() => {
+    const activePlayers = players.filter((p) => !p.isEliminated);
+    if (players.length > 1 && activePlayers.length === 1) {
+      setWinner(activePlayers[0].id);
+    } else {
+      setWinner(null);
+    }
+  }, [players]);
 
   return (
     <div className="flex flex-col space-y-6 w-full max-w-4xl mx-auto p-4">
@@ -338,9 +395,9 @@ export function GameBoard({
       )}
       <div className="flex justify-between items-center">
         <div className="flex flex-col sm:flex-row items-center justify-between w-full">
-          <h2 className="text-2xl font-bold">
+          <h2 className="text-muted-foreground">
             Current Word:{" "}
-            <span className="text-purple-600">
+            <span className="text-purple-600 text-3xl font-bold capitalize">
               {localCurrentWord || "No active round"}
             </span>
           </h2>
@@ -355,7 +412,7 @@ export function GameBoard({
         </div>
       </div>
 
-      {/* Start round form (only for non-eliminated players) */}
+      {/* Manual Round Start Form */}
       {!currentRoundId && (
         <>
           {isCurrentUserEliminated ? (
@@ -382,7 +439,7 @@ export function GameBoard({
         </>
       )}
 
-      {/* Display players */}
+      {/* Players Display */}
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
         {players.map((player) => (
           <Card
@@ -405,7 +462,7 @@ export function GameBoard({
         ))}
       </div>
 
-      {/* Word submission and dispute actions */}
+      {/* Word Submission & Dispute Actions */}
       {currentRoundId && (
         <>
           {playerId !== activePlayer && (
@@ -424,7 +481,6 @@ export function GameBoard({
                 placeholder="Enter your word"
                 value={newWord}
                 onChange={(e) => setNewWord(e.target.value)}
-                disabled={isSubmitting || playerId !== activePlayer}
               />
             </div>
             <Button
@@ -437,6 +493,7 @@ export function GameBoard({
               variant="outline"
               type="button"
               onClick={handleDisputeClick}
+              disabled={!canDispute}
             >
               Dispute
             </Button>
@@ -444,9 +501,10 @@ export function GameBoard({
         </>
       )}
 
-      {/* Dispute voting modal */}
+      {/* Dispute Voting Modal */}
       {showDisputeModal && latestSubmission && (
         <DisputeVotingModal
+          submissionTime={latestSubmission.created_at}
           submissionId={latestSubmission.id}
           currentPlayerId={playerId}
           onFinalize={(result: boolean) => {

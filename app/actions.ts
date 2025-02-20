@@ -162,7 +162,6 @@ export async function createGameAction(formData: FormData) {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) throw new Error("User not authenticated");
-  const playerId = user.id; // Use this as the player's id
 
   const playerName = formData.get("playerName") as string;
   const timerDuration = formData.get("timerDuration") as string;
@@ -183,18 +182,18 @@ export async function createGameAction(formData: FormData) {
   if (lobbyError) throw new Error(lobbyError.message);
 
   // Insert the host (creator) into the players table.
-  // Set "id" explicitly to the authenticated user's ID.
+  // Let the DB generate the player's primary key.
   const { data: playerData, error: playerError } = await supabase
     .from("players")
     .insert([
       {
-        id: playerId, // Explicitly set the id so it matches later.
+        id: user.id, // use the user's ID as the player's ID
         lobby_id: lobbyData.id,
         name: playerName,
         join_order: 1,
         is_host: true,
         status: "active",
-        profile_id: user.id, // Optionally link to the profiles table.
+        profile_id: user.id, // link to the profiles table
       },
     ])
     .select("*")
@@ -213,7 +212,6 @@ export async function joinGameAction(formData: FormData) {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) throw new Error("User not authenticated");
-  const playerId = user.id;
 
   const gameCode = formData.get("gameCode") as string;
   const playerName = formData.get("playerName") as string;
@@ -231,14 +229,14 @@ export async function joinGameAction(formData: FormData) {
     .from("players")
     .select("*")
     .eq("lobby_id", lobbyData.id)
-    .eq("id", playerId)
+    .eq("profile_id", user.id)
     .maybeSingle();
   if (existingPlayerError) throw new Error(existingPlayerError.message);
 
   // If the player record already exists, simply redirect.
   if (existingPlayer) {
     redirect(
-      `/protected/game-board?lobbyId=${lobbyData.id}&playerId=${playerId}`
+      `/protected/game-board?lobbyId=${lobbyData.id}&playerId=${existingPlayer.id}`
     );
     return;
   }
@@ -251,17 +249,19 @@ export async function joinGameAction(formData: FormData) {
   if (playersError) throw new Error(playersError.message);
   const joinOrder = (playersData?.length || 0) + 1;
 
-  // Insert the new player into the players table using the auth user's ID.
+  // Insert the new player into the players table.
+  // Let the DB generate a unique primary key.
   const { data: playerData, error: playerError } = await supabase
     .from("players")
     .insert([
       {
-        id: playerId, // use the authenticated user's ID
+        id: user.id,
         lobby_id: lobbyData.id,
         name: playerName,
         join_order: joinOrder,
         is_host: false,
         status: "active",
+        profile_id: user.id, // link to the profiles table if needed
       },
     ])
     .select("*")
@@ -279,14 +279,23 @@ export async function submitWordAction(formData: FormData) {
   const playerId = formData.get("playerId") as string;
   const word = formData.get("word") as string;
 
-  const { data, error } = await supabase
+  // 1. Insert the submission.
+  const { data: submission, error: submissionError } = await supabase
     .from("submissions")
     .insert([{ round_id: roundId, player_id: playerId, word }])
     .select("*")
     .single();
+  if (submissionError) throw new Error(submissionError.message);
 
-  if (error) throw new Error(error.message);
-  return data;
+  // 2. Because of the trigger, the round's active_player_id and start_time have been updated.
+  const { data: updatedRound, error: roundUpdateError } = await supabase
+    .from("rounds")
+    .select("*")
+    .eq("id", roundId)
+    .single();
+  if (roundUpdateError) throw new Error(roundUpdateError.message);
+
+  return { submission, updatedRound };
 }
 
 export async function disputeWordAction(formData: FormData) {
@@ -310,6 +319,14 @@ export async function startRoundAction(formData: FormData) {
   const startingPlayerId = formData.get("startingPlayerId") as string;
   const startingWord = formData.get("startingWord") as string;
 
+  // get player id from session
+  const { data: player, error: playerError } = await supabase
+    .from("players")
+    .select("id")
+    .eq("profile_id", startingPlayerId)
+    .single();
+  if (playerError) throw new Error(playerError.message);
+
   // Determine the new round number.
   const { data: latestRound, error: roundError } = await supabase
     .from("rounds")
@@ -323,22 +340,22 @@ export async function startRoundAction(formData: FormData) {
   }
   const newRoundNumber = latestRound ? latestRound.round_number + 1 : 1;
 
-  // Insert a new round record with the startingPlayerId.
+  // Insert a new round record including active_player_id.
   const { data: newRound, error: insertError } = await supabase
     .from("rounds")
     .insert([
       {
         lobby_id: lobbyId,
         starting_player_id: startingPlayerId,
+        active_player_id: startingPlayerId, // Set the active player initially.
         round_number: newRoundNumber,
         starting_word: startingWord,
+        start_time: new Date().toISOString(), // Optionally set the start time.
       },
     ])
     .select("*")
     .single();
-  if (insertError) {
-    throw new Error(insertError.message);
-  }
+  if (insertError) throw new Error(insertError.message);
   return newRound;
 }
 

@@ -9,6 +9,7 @@ import { castVoteAction, finalizeDisputeAction } from "@/app/actions";
 type DisputeVotingModalProps = {
   submissionId: string;
   currentPlayerId: string;
+  submissionTime: Date;
   onFinalize: (result: boolean) => void;
   onClose: () => void;
 };
@@ -16,6 +17,7 @@ type DisputeVotingModalProps = {
 export default function DisputeVotingModal({
   submissionId,
   currentPlayerId,
+  submissionTime,
   onFinalize,
   onClose,
 }: DisputeVotingModalProps) {
@@ -25,18 +27,21 @@ export default function DisputeVotingModal({
   const [timer, setTimer] = useState(5);
 
   useEffect(() => {
+    if (!submissionTime) return;
+
+    const endTime = submissionTime.getTime() + 5000;
     const interval = setInterval(() => {
-      setTimer((prev) => {
-        if (prev <= 1) {
-          clearInterval(interval);
-          if (!finalizing) finalizeVoting();
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
+      const remaining = Math.max(0, Math.ceil((endTime - Date.now()) / 1000));
+      setTimer(remaining);
+
+      if (remaining <= 0) {
+        clearInterval(interval);
+        finalizeVoting();
+      }
+    }, 100);
+
     return () => clearInterval(interval);
-  }, [finalizing]);
+  }, [submissionTime]);
 
   async function handleVote(voteValue: boolean) {
     const formData = new FormData();

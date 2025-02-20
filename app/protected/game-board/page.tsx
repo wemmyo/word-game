@@ -1,4 +1,3 @@
-// app/game-board/page.tsx
 import { redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { GameBoard } from "@/components/game-board";
@@ -8,7 +7,7 @@ export default async function GameBoardPage({
 }: {
   searchParams: Promise<{ lobbyId: string }>;
 }) {
-  const { lobbyId } = await searchParams; // Remove 'await' here
+  const { lobbyId } = await searchParams;
   const supabase = await createClient();
 
   // Retrieve the authenticated user.
@@ -21,7 +20,7 @@ export default async function GameBoardPage({
   }
   const playerId = user.id;
 
-  // Fetch lobby data (including game_code and timer_duration).
+  // Fetch lobby data.
   const { data: lobbyData, error: lobbyError } = await supabase
     .from("lobbies")
     .select("game_code, timer_duration")
@@ -57,33 +56,29 @@ export default async function GameBoardPage({
     .limit(1)
     .single();
 
-  // Use lobby's timer_duration as maxTime and initial timeLeft.
   const maxTime = lobbyData.timer_duration || 30;
   const timeLeft = maxTime;
 
   let currentPlayer = "";
   let currentWord = "";
+  let currentRoundId: string | null = null;
+  let persistedStartTime: number | null = null;
   if (roundData) {
+    currentRoundId = roundData.id;
+    // Use the persisted active_player_id (or fallback to starting_player_id)
+    currentPlayer = roundData.active_player_id || roundData.starting_player_id;
+    // Persist the start_time from the round record.
+    persistedStartTime = roundData.start_time
+      ? new Date(roundData.start_time).getTime()
+      : null;
+    // Fetch the latest submission (most recent) for the round.
     const { data: submissionData } = await supabase
       .from("submissions")
-      .select("player_id, created_at, word")
+      .select("word")
       .eq("round_id", roundData.id)
-      .order("created_at", { ascending: true })
+      .order("created_at", { ascending: false })
       .limit(1)
       .single();
-
-    const activePlayers = players.filter((p) => !p.isEliminated);
-    if (submissionData) {
-      const submitterIndex = activePlayers.findIndex(
-        (p) => p.id === submissionData.player_id
-      );
-      if (activePlayers.length > 0) {
-        currentPlayer =
-          activePlayers[(submitterIndex + 1) % activePlayers.length].id;
-      }
-    } else {
-      currentPlayer = roundData.starting_player_id;
-    }
     currentWord = submissionData
       ? submissionData.word
       : roundData.starting_word;
@@ -99,6 +94,8 @@ export default async function GameBoardPage({
       playerId={playerId}
       gameCode={lobbyData.game_code}
       currentPlayer={currentPlayer}
+      currentRoundId={currentRoundId}
+      roundStartTime={persistedStartTime}
     />
   );
 }
