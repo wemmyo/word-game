@@ -16,6 +16,7 @@ import {
 } from "@/app/actions";
 import { createClient } from "@/utils/supabase/client";
 import DisputeVotingModal from "./dispute-vote";
+import { cn } from "@/lib/utils";
 
 export type Player = {
   id: string;
@@ -439,29 +440,6 @@ export function GameBoard({
         </>
       )}
 
-      {/* Players Display */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
-        {players.map((player) => (
-          <Card
-            key={player.id}
-            className={`${
-              player.isEliminated ? "opacity-50" : ""
-            } ${player.id === activePlayer ? "border-purple-500 border-2" : ""}`}
-          >
-            <CardContent className="flex flex-col items-center p-4">
-              <Avatar className="w-16 h-16">
-                <AvatarImage src={player.avatar} alt={player.name} />
-                <AvatarFallback>{player.name.charAt(0)}</AvatarFallback>
-              </Avatar>
-              <p className="mt-2 font-semibold">{player.name}</p>
-              {player.isEliminated && (
-                <p className="text-red-500">Eliminated</p>
-              )}
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-
       {/* Word Submission & Dispute Actions */}
       {currentRoundId && (
         <>
@@ -500,6 +478,30 @@ export function GameBoard({
           </form>
         </>
       )}
+
+      {/* Players Display */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+        {players.map((player) => (
+          <Card
+            key={player.id}
+            className={cn({
+              "opacity-50": player.isEliminated,
+              "border-purple-500 border-2": player.id === activePlayer,
+            })}
+          >
+            <CardContent className="flex flex-col items-center p-4">
+              <Avatar className="w-16 h-16">
+                <AvatarImage src={player.avatar} alt={player.name} />
+                <AvatarFallback>{player.name.charAt(0)}</AvatarFallback>
+              </Avatar>
+              <p className="mt-2 font-semibold">{player.name}</p>
+              {player.isEliminated && (
+                <p className="text-red-500">Eliminated</p>
+              )}
+            </CardContent>
+          </Card>
+        ))}
+      </div>
 
       {/* Dispute Voting Modal */}
       {showDisputeModal && latestSubmission && (
